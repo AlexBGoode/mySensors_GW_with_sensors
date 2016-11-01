@@ -83,63 +83,146 @@
 //#define MY_DEFAULT_TX_LED_PIN  5  // the PCB, on board LED
 
 #include <SPI.h>
-#include <MySensors.h>  
+#include <MySensors.h>
+#include <DHT.h>
+#include <Adafruit_Sensor.h>
+//https://github.com/RobTillaart/Arduino/tree/master/libraries/RunningMedian
+#include <RunningMedian.h>
 
-#define CHILD_ID_TEMP 0
-#define TEMP_SENSOR_ANALOG_PIN 7
-unsigned long SLEEP_TIME = 30*1000; // Sleep time between reads (in milliseconds)
-//const float c = 10/(1100/1024); // reading portion for 1 degree Celcius
-const float c = 9.30909;
-//int lastTEMP = 0;
-uint16_t reading;
-float tempC;
+// virtual group 1#
+#define CHILD_ID_LM35_TEMP 0        // real temp
+#define CHILD_ID_LM35_TEMP_AVG 1    // calculated average for last 3 values
+#define CHILD_ID_LM35_TEMP_INT 2    // calculated int of the average
+// virtual group 2#
+#define CHILD_ID_DHT11_TEMP 3       // real temp
+#define CHILD_ID_DHT11_HUM 4        // real humidity
+#define CHILD_ID_DHT11_TEMP_AVG 5   // calculated average for last 3 values
+
+#define LM35_SENSOR_ANALOG_PIN 7
+#define LM35_C 9.30909
+
+#define DHT11_SENSOR_DIGITAL_PIN 5
+#define DHTTYPE DHT11
+#define DHT_READ_INTERVAL 2500      // wait at least 2.5 seconds between readings
+
+#define SLEEP_TIME 30*1000          // sleep time between reads (in milliseconds)
+
+
+RunningMedian rmDHT11 = RunningMedian( 5 );
+RunningMedian rmLM35 = RunningMedian( 3 );
+
+float t;
+float h;
+float averageDHT11;
+uint16_t readingLM35, lastReadingLM35 = 0;
+float tempLM35;
+float averageLM35;
+int intLM35;
+
+DHT dht( DHT11_SENSOR_DIGITAL_PIN, DHT11 );
 
 // Initialize temperature message
-MyMessage msgTemp(CHILD_ID_TEMP, V_TEMP);
+// virtual group 1#
+MyMessage msgLM35Temp( CHILD_ID_LM35_TEMP, V_TEMP );
+MyMessage msgLM35TempInt( CHILD_ID_LM35_TEMP_INT, V_HUM );
+//MyMessage msgLM35TempAgv( CHILD_ID_LM35_TEMP_AVG, V_PRESSURE );
+// virtual group 2#
+MyMessage msgDHT11Temp( CHILD_ID_DHT11_TEMP, V_TEMP );
+MyMessage msgDHT11Humidity( CHILD_ID_DHT11_HUM, V_HUM );
+//MyMessage msgDHT11TempAgv( CHILD_ID_DHT11_TEMP_AVG, V_PRESSURE );
 
 void setup() { 
   // Setup locally attached sensors
-  // sets ref voltage for conversion to 1.1 vs the default 5 V
+
+  // Prepare LM35
+  // Sets ref voltage for conversion to 1.1 vs the default 5 V
   // This gives much better accuracy since the 10 bit ADC is spread over 1.1V vs the default 5V
-  analogReference(INTERNAL);  // http://playground.arduino.cc/Main/LM35HigherResolution
+  analogReference( INTERNAL );  // http://playground.arduino.cc/Main/LM35HigherResolution
+
+  // Prepare DHT11
+  dht.begin();  // does nothing else but setting pinMode(_pin, INPUT_PULLUP);
 }
 
 void presentation() {
  // Present locally attached sensors 
-  sendSketchInfo("GW with Temp Sensor", "1.2");
-  present(CHILD_ID_TEMP, S_TEMP);
-  Serial.print("The constant: ");
-  Serial.println(c);
+  sendSketchInfo( "GW with Sensors", "1.3" );
   
-  Serial.print("Reading 1st time to warm up: ");
-  Serial.println(analogRead(TEMP_SENSOR_ANALOG_PIN));
+  // should be auto grouped according to
+  // https://forum.mysensors.org/topic/5132/ds18b20-ans-sht31-d-show-up-as-combined-sensors-on-domoticz
+  // as Group 1#
+  present( CHILD_ID_LM35_TEMP, S_TEMP, "LM35 float temp" );
+  present( CHILD_ID_LM35_TEMP_INT, S_HUM, "LM35 integer temp" );
+//  present( CHILD_ID_LM35_TEMP_AVG, S_BARO, "LM35 average temp" );
+  // as Group 2#
+  present( CHILD_ID_DHT11_TEMP, S_TEMP, "DHT11 float temp" );
+  present( CHILD_ID_DHT11_HUM, S_HUM, "DHT11 humitity" );
+//  present( CHILD_ID_DHT11_TEMP_AVG, S_BARO, "DHT11 integer temp" );
+
+  Serial.print( "The constant for LM35: ");
+  Serial.println( LM35_C );
+  
+  Serial.print( "Reading DHT11 1st time to warm it up: ");
+  Serial.println( analogRead( LM35_SENSOR_ANALOG_PIN ));
 }
 
 void loop() { 
   // Send locally attached sensor data here 
+
+  sleep( DHT_READ_INTERVAL ); // wait between readings
+  // Reading temperature or humidity takes about 250 milliseconds!
+  // Sensor readings may also be up to 2 seconds 'old' (its a very slow sensor)
+
+  h = dht.readHumidity();
+  t = dht.readTemperature();       // Read temperature as Celsius (the default)
+
+  // Check if any reads failed and exit early (to try again).
+  if (isnan(h) || isnan(t)) {
+    Serial.println( "Failed to read from DHT sensor!" );
+    return;
+  }
+
+  rmDHT11.add( t );
+  averageDHT11 = rmDHT11.getAverage();
+
+  Serial.print(" - DHT11 Temp ");
+  Serial.print( t );
+  Serial.print(" | Humidity ");
+  Serial.print( h );
+  Serial.print(" | Running average ");
+  Serial.println( averageDHT11 );
+
+  send( msgDHT11Temp.set( t, 1));                 // report float value
+//  send( msgDHT11TempAgv.set( averageDHT11, 1 ));  // report float value
+  send( msgDHT11Humidity.set( h, 0 ));            // report int value
+
+
   // http://playground.arduino.cc/Main/LM35HigherResolution
   // using aRef 1.1V instead of aRef 5V
-  // divide 1.1V over 1024 of ADC resolution = 0.00107421875 V = 1.07421875 mV per step
-  // 10 mV is equal to 1 degree Celcius, 10 / 1.07421875 = 9.30(90) = ~9.31
-  // for every change of 9.31 in the analog reading, there is one degree of temperature change
-  reading = analogRead(TEMP_SENSOR_ANALOG_PIN);// Get TEMP value
-  tempC = reading / c;
+  readingLM35 = analogRead( LM35_SENSOR_ANALOG_PIN ); // Get TEMP value
 
-  Serial.print("Raw Signal Value (0-1023): ");
-  Serial.print(reading);
+  tempLM35 = readingLM35 / LM35_C;
+  rmLM35.add( tempLM35 );
+
+  averageLM35 = rmLM35.getAverage();
+  intLM35 = round( averageLM35 );
+
+  Serial.print( " - LM35 Raw Signal Value (0-1023): ");
+  Serial.print( readingLM35 );
   
-  Serial.print(" - Temp: ");
-  Serial.println(tempC);
+  Serial.print(" - Temp ");
+  Serial.print( tempLM35 );
+  Serial.print(" | Average temp ");
+  Serial.print( averageLM35 );
+  Serial.print(" | Int temp ");
+  Serial.println( intLM35 );
 
-//  if (ceil(tempC) != lastTEMP) {
-//      send(msgTemp.set((int)ceil(tempC)));
-//      lastTEMP = ceil(tempC);
-//  }  
+  send( msgLM35Temp.set( tempLM35, 1 ));          // report float value
+//  send( msgLM35TempAgv.set( averageLM35, 1 ));    // report float value
+  send( msgLM35TempInt.set( intLM35 ));           // report int value
 
-  // Return float XX.X C
-  send(msgTemp.set(tempC,1));
 
-  sleep(SLEEP_TIME);
+
+  sleep( SLEEP_TIME );
 }
 
 
